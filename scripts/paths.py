@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+跨用户路径探测（video-voiceover-chatcut）
+=========================================
+本技能要分享给不同用户，不能写死 C:/Users/xxx。这里统一探测 5 个关键路径，
+优先用 PATH 里的可执行文件，否则退回 WorkBuddy 标准目录（~/.workbuddy/...）。
+
+探测顺序：
+  venv_py    : shutil.which("python") → WorkBuddy 托管 venv
+  tts_skill  : ~/.workbuddy/skills/text-to-clonedvoice-video-full/scripts
+  vosk_model : 环境变量 VOSK_MODEL → ~/.cache/vosk-models → ~/.workbuddy/models → 项目目录(兜底)
+  ffmpeg_bin : shutil.which("ffmpeg") → 常见安装位置
+  node_bin   : shutil.which("node") → WorkBuddy 托管 node 最新版本
+"""
+import os
+import shutil
+
+
+def read_text(path):
+    """读取文本文件并自动探测编码，避免中文 Windows 用户 GBK/GB18030 文件乱码。
+
+    探测顺序：utf-8-sig（现代 UTF-8 / 带 BOM）→ gb18030（中文 Windows 默认 GBK 超集）
+    → utf-8（无 BOM）→ latin-1（兜底，绝不抛异常，最多显示成乱码但不会崩）。
+    专门用于：文案 .txt 可能被记事本存成 GBK，直接 utf-8 解码会全盘乱码。
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8-sig", "gb18030", "utf-8"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
+
+
+def detect_paths():
+    home = os.path.expanduser("~")
+
+    # 1. venv python（优先用 setup.py 建的 envs/default，edge_tts 装在里面）
+    _venv_bin = "Scripts" if os.name == "nt" else "bin"
+    _venv_pyname = "python.exe" if os.name == "nt" else "python"
+    venv_default = os.path.join(
+        home, ".workbuddy", "binaries", "python", "envs", "default", _venv_bin, _venv_pyname
+    )
+    if os.path.isfile(venv_default):
+        venv_py = venv_default
+    else:
+        venv_py = (
+            shutil.which("python")
+            or shutil.which("python3")
+            or venv_default
+        )
+
+    # 2. text-to-clonedvoice-video-full 技能脚本目录（WorkBuddy 标准位置）
+    tts_skill = os.path.join(
+        home, ".workbuddy", "skills",
+        "text-to-clonedvoice-video-full", "scripts"
+    )
+
+    # 3. Vosk 中文模型（环境变量优先，其次标准缓存/模型目录）
+    vosk = os.environ.get("VOSK_MODEL")
+    if not vosk:
+        for cand in [
+            os.path.join(home, ".cache", "vosk-models", "vosk-model-small-cn-0.22"),
+            os.path.join(home, ".workbuddy", "models", "vosk-model-small-cn-0.22"),
+            os.path.join(home, "WorkBuddy", "Claw", "_vosk_model", "vosk-model-small-cn-0.22"),
+        ]:
+            if os.path.isdir(cand):
+                vosk = cand
+                break
+
+    # 4. ffmpeg（优先 PATH，否则常见安装位置）
+    ffmpeg_bin = None
+    fw = shutil.which("ffmpeg")
+    if fw:
+        ffmpeg_bin = os.path.dirname(fw)
+    else:
+        for cand in [
+            os.path.join(home, "bin", "ffmpeg", "ffmpeg-8.1.2-essentials_build", "bin"),
+            r"C:/ffmpeg/bin",
+            r"C:/Program Files/ffmpeg/bin",
+        ]:
+            if os.path.exists(os.path.join(cand, "ffmpeg.exe")):
+                ffmpeg_bin = cand
+                break
+
+    # 4.5 ffprobe 与 ffmpeg 同目录（用于读取音频时长，做音画同步）
+    ffprobe_bin = ffmpeg_bin
+
+    # 5. node（优先 PATH，否则 WorkBuddy 托管 node 目录下的任意版本）
+    node_bin = None
+    nw = shutil.which("node")
+    if nw:
+        node_bin = os.path.dirname(nw)
+    else:
+        nb = os.path.join(home, ".workbuddy", "binaries", "node", "versions")
+        if os.path.isdir(nb):
+            try:
+                vers = sorted(os.listdir(nb))
+                if vers:
+                    node_bin = os.path.join(nb, vers[-1])
+            except Exception:
+                pass
+
+    return {
+        "venv_py": venv_py,
+        "tts_skill": tts_skill,
+        "vosk_model": vosk,
+        "ffmpeg_bin": ffmpeg_bin,
+        "ffprobe_bin": ffprobe_bin,
+        "node_bin": node_bin,
+    }
+
+
+# 依赖缺失时给中文提示（仅返回核心依赖缺失，增强依赖不阻塞启动）
+def missing_hints(p):
+    miss = []
+    # ffmpeg 是核心依赖（合并视频+字幕必须）
+    if not p["ffmpeg_bin"] or not os.path.isfile(os.path.join(p["ffmpeg_bin"], "ffmpeg.exe")):
+        miss.append(
+            "ffmpeg：请安装 ffmpeg 并加入 PATH，或放到 %USERPROFILE%/bin/ffmpeg/"
+            "ffmpeg-8.1.2-essentials_build/bin"
+        )
+    # edge_tts 在运行时 import 检查（setup.py 会装），这里不重复检查
+    return miss
+
+
+if __name__ == "__main__":
+    import json
+    print(json.dumps(detect_paths(), ensure_ascii=False, indent=2))
