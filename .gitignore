@@ -1,0 +1,12 @@
+# 依赖与构建产物
+node_modules/
+__pycache__/
+*.pyc
+out/
+.DS_Store
+
+# 本地生成物（用户输出，不进仓库）
+*_remotion/
+*_narration/
+*_画面.mp4
+*_口播版.mp4
